@@ -1,0 +1,139 @@
+syntax = "proto3";
+
+package lms;
+
+service LMSService {
+    // Authentication
+    rpc Login(LoginRequest) returns (LoginResponse);
+    rpc Logout(LogoutRequest) returns (LogoutResponse);
+    
+    // Data operations
+    rpc Post(PostRequest) returns (PostResponse);
+    rpc Get(GetRequest) returns (GetResponse);
+    
+    // Grading
+    rpc SubmitGrade(GradeRequest) returns (GradeResponse);
+    
+    // Query handling
+    rpc PostQuery(QueryRequest) returns (QueryResponse);
+    rpc GetLLMAnswer(LLMQueryRequest) returns (LLMQueryResponse);
+    
+    // File operations
+    rpc UploadFile(stream FileChunk) returns (UploadResponse);
+    rpc DownloadFile(FileRequest) returns (stream FileChunk);
+}
+
+// Authentication messages
+message LoginRequest {
+    string username = 1;
+    string password = 2;
+    string user_type = 3;  // STUDENT or INSTRUCTOR
+}
+
+message LoginResponse {
+    bool success = 1;
+    string token = 2;
+    string error = 3;
+    string user_id = 4;
+}
+
+message LogoutRequest {
+    string token = 1;
+}
+
+message LogoutResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// Data operations
+message PostRequest {
+    string token = 1;
+    string type = 2;  // ASSIGNMENT, QUERY, COURSE_MATERIAL
+    string data = 3;  // JSON-encoded data
+    bytes file_data = 4;  // For file uploads
+    string filename = 5;
+}
+
+message PostResponse {
+    bool success = 1;
+    string error = 2;
+    string id = 3;  // ID of created resource
+}
+
+message GetRequest {
+    string token = 1;
+    string type = 2;  // ASSIGNMENTS, QUERIES, COURSE_MATERIALS, STUDENTS, GRADES
+    string filter = 3;  // JSON-encoded filter criteria
+}
+
+message GetResponse {
+    bool success = 1;
+    string error = 2;
+    repeated DataItem items = 3;
+}
+
+message DataItem {
+    string id = 1;
+    string type = 2;
+    string data = 3;  // JSON-encoded data
+}
+
+// Grading
+message GradeRequest {
+    string token = 1;
+    string assignment_id = 2;
+    string student_id = 3;
+    float grade = 4;
+    string feedback = 5;
+}
+
+message GradeResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// Query handling
+message QueryRequest {
+    string token = 1;
+    string query = 2;
+    bool use_llm = 3;  // true for LLM, false for instructor
+}
+
+message QueryResponse {
+    bool success = 1;
+    string error = 2;
+    string query_id = 3;
+}
+
+message LLMQueryRequest {
+    string query_id = 1;
+    string query = 2;
+    string context = 3;  // JSON-encoded context with student level, course materials
+}
+
+message LLMQueryResponse {
+    bool success = 1;
+    string error = 2;
+    string answer = 3;
+}
+
+// File operations
+message FileChunk {
+    string filename = 1;
+    bytes content = 2;
+    int32 chunk_number = 3;
+    bool is_last = 4;
+}
+
+message FileRequest {
+    string token = 1;
+    string filename = 2;
+    string file_type = 3;  // COURSE_MATERIAL or ASSIGNMENT
+}
+
+message UploadResponse {
+    bool success = 1;
+    string error = 2;
+    string file_id = 3;
+}

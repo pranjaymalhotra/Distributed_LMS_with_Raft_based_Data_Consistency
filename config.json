@@ -1,0 +1,77 @@
+{
+    "cluster": {
+        "nodes": {
+            "node1": {
+                "id": "node1",
+                "host": "localhost",
+                "raft_port": 5001,
+                "lms_port": 6001,
+                "role": "LMS_WITH_RAFT"
+            },
+            "node2": {
+                "id": "node2",
+                "host": "localhost",
+                "raft_port": 5002,
+                "lms_port": 6002,
+                "role": "LMS_WITH_RAFT"
+            }
+        },
+        "tutoring_server": {
+            "host": "localhost",
+            "port": 7001,
+            "model": "deepseek-r1:1.5b",
+            "context_window": 2048
+        }
+    },
+    "raft": {
+        "election_timeout_min_ms": 150,
+        "election_timeout_max_ms": 300,
+        "heartbeat_interval_ms": 50,
+        "snapshot_interval": 100,
+        "max_log_entries": 1000,
+        "sync_interval_ms": 10,
+        "request_timeout_ms": 5000,
+        "max_append_entries": 100
+    },
+    "storage": {
+        "raft_logs_dir": "data/raft_logs",
+        "raft_snapshots_dir": "data/raft_snapshots",
+        "course_materials_dir": "data/course_materials",
+        "assignments_dir": "data/assignments",
+        "database_dir": "data/database"
+    },
+    "auth": {
+        "token_expiry_hours": 24,
+        "default_users": [
+            {
+                "username": "instructor1",
+                "password": "pass123",
+                "type": "INSTRUCTOR",
+                "name": "Dr. Smith"
+            },
+            {
+                "username": "student1",
+                "password": "pass123",
+                "type": "STUDENT",
+                "name": "Alice Johnson"
+            },
+            {
+                "username": "student2",
+                "password": "pass123",
+                "type": "STUDENT",
+                "name": "Bob Wilson"
+            },
+            {
+                "username": "student3",
+                "password": "pass123",
+                "type": "STUDENT",
+                "name": "Charlie Davis"
+            }
+        ]
+    },
+    "logging": {
+        "level": "INFO",
+        "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        "file": "logs/lms.log"
+    }
+}

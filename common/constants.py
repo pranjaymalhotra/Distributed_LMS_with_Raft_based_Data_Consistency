@@ -1,0 +1,82 @@
+"""
+Constants used throughout the distributed LMS system.
+"""
+
+# User types
+USER_TYPE_STUDENT = "STUDENT"
+USER_TYPE_INSTRUCTOR = "INSTRUCTOR"
+
+# Data types for Get/Post operations
+DATA_TYPE_ASSIGNMENT = "ASSIGNMENT"
+DATA_TYPE_QUERY = "QUERY"
+DATA_TYPE_COURSE_MATERIAL = "COURSE_MATERIAL"
+DATA_TYPE_SUBMISSION = "SUBMISSION"
+DATA_TYPE_GRADE = "GRADE"
+DATA_TYPE_STUDENTS = "STUDENTS"
+
+# Raft command types
+RAFT_CMD_CREATE_ASSIGNMENT = "CREATE_ASSIGNMENT"
+RAFT_CMD_SUBMIT_ASSIGNMENT = "SUBMIT_ASSIGNMENT"
+RAFT_CMD_GRADE_ASSIGNMENT = "GRADE_ASSIGNMENT"
+RAFT_CMD_POST_QUERY = "POST_QUERY"
+RAFT_CMD_ANSWER_QUERY = "ANSWER_QUERY"
+RAFT_CMD_UPLOAD_MATERIAL = "UPLOAD_MATERIAL"
+RAFT_CMD_UPDATE_PROGRESS = "UPDATE_STUDENT_PROGRESS"
+RAFT_CMD_CREATE_USER = "CREATE_USER"
+RAFT_CMD_UPDATE_TOKEN = "UPDATE_TOKEN"
+
+# Student levels
+LEVEL_BEGINNER = "BEGINNER"
+LEVEL_INTERMEDIATE = "INTERMEDIATE"
+LEVEL_ADVANCED = "ADVANCED"
+
+# File types
+FILE_TYPE_PDF = "PDF"
+FILE_TYPE_TXT = "TXT"
+
+# Maximum file sizes (in bytes)
+MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_CHUNK_SIZE = 1 * 1024 * 1024  # 1MB
+
+# Token expiry
+DEFAULT_TOKEN_EXPIRY_HOURS = 24
+
+# Grade thresholds
+GRADE_THRESHOLD_ADVANCED = 85.0
+GRADE_THRESHOLD_INTERMEDIATE = 70.0
+
+# Query response sources
+QUERY_SOURCE_LLM = "LLM"
+QUERY_SOURCE_INSTRUCTOR = "INSTRUCTOR"
+
+# Status codes
+STATUS_SUCCESS = "SUCCESS"
+STATUS_ERROR = "ERROR"
+STATUS_NOT_FOUND = "NOT_FOUND"
+STATUS_UNAUTHORIZED = "UNAUTHORIZED"
+STATUS_INVALID_REQUEST = "INVALID_REQUEST"
+
+# Error messages
+ERROR_NOT_AUTHENTICATED = "User not authenticated"
+ERROR_INVALID_TOKEN = "Invalid or expired token"
+ERROR_NOT_AUTHORIZED = "User not authorized for this operation"
+ERROR_NOT_LEADER = "This node is not the leader"
+ERROR_FILE_TOO_LARGE = "File size exceeds maximum allowed"
+ERROR_INVALID_FILE_TYPE = "Invalid file type. Only PDF and TXT files are allowed"
+ERROR_USER_NOT_FOUND = "User not found"
+ERROR_ASSIGNMENT_NOT_FOUND = "Assignment not found"
+ERROR_QUERY_NOT_FOUND = "Query not found"
+ERROR_SUBMISSION_NOT_FOUND = "Submission not found"
+ERROR_MATERIAL_NOT_FOUND = "Course material not found"
+
+# Success messages
+SUCCESS_LOGIN = "Login successful"
+SUCCESS_LOGOUT = "Logout successful"
+SUCCESS_ASSIGNMENT_CREATED = "Assignment created successfully"
+SUCCESS_ASSIGNMENT_SUBMITTED = "Assignment submitted successfully"
+SUCCESS_ASSIGNMENT_GRADED = "Assignment graded successfully"
+SUCCESS_QUERY_POSTED = "Query posted successfully"
+SUCCESS_QUERY_ANSWERED = "Query answered successfully"
+SUCCESS_MATERIAL_UPLOADED = "Course material uploaded successfully"
+SUCCESS_FILE_UPLOADED = "File uploaded successfully"
+SUCCESS_FILE_DOWNLOADED = "File downloaded successfully"

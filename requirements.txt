@@ -1,0 +1,24 @@
+# Core dependencies
+grpcio==1.60.0
+grpcio-tools==1.60.0
+protobuf==4.25.1
+
+# Storage and data handling
+PyPDF2==3.0.1
+
+# Natural Language Processing for tutoring
+nltk==3.8.1
+
+# HTTP client for Ollama
+requests==2.31.0
+
+# Process management for cluster scripts
+psutil==5.9.6
+
+# Development dependencies
+pytest==7.4.3
+pytest-asyncio==0.21.1
+pytest-timeout==2.2.0
+
+# Optional: For better logging
+colorlog==6.8.0

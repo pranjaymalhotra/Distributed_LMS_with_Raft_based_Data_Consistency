@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+package tutoring;
+
+service TutoringService {
+    // Get answer from LLM
+    rpc GetLLMAnswer(LLMRequest) returns (LLMResponse);
+    
+    // Process course material for context
+    rpc ProcessCourseMaterial(CourseMaterialRequest) returns (ProcessResponse);
+    
+    // Health check
+    rpc HealthCheck(HealthRequest) returns (HealthResponse);
+}
+
+// LLM request/response
+message LLMRequest {
+    string query_id = 1;
+    string query = 2;
+    string student_id = 3;
+    StudentContext context = 4;
+}
+
+message StudentContext {
+    string student_level = 1;  // BEGINNER, INTERMEDIATE, ADVANCED
+    repeated string relevant_materials = 2;  // List of relevant course material IDs
+    repeated GradeInfo recent_grades = 3;
+    string course_context = 4;  // JSON-encoded course information
+}
+
+message GradeInfo {
+    string assignment_id = 1;
+    float grade = 2;
+    string topic = 3;
+}
+
+message LLMResponse {
+    string query_id = 1;
+    string answer = 2;
+    string difficulty_level = 3;  // Level of explanation provided
+    repeated string references = 4;  // Course materials referenced
+    bool success = 5;
+    string error = 6;
+}
+
+// Course material processing
+message CourseMaterialRequest {
+    string material_id = 1;
+    string filename = 2;
+    bytes content = 3;
+    string content_type = 4;  // PDF or TXT
+}
+
+message ProcessResponse {
+    bool success = 1;
+    string error = 2;
+    string summary = 3;  // Extracted key concepts
+    repeated string topics = 4;
+}
+
+// Health check
+message HealthRequest {
+    string node_id = 1;
+}
+
+message HealthResponse {
+    bool healthy = 1;
+    bool llm_ready = 2;
+    string model_name = 3;
+}

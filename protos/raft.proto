@@ -1,0 +1,137 @@
+syntax = "proto3";
+
+package raft;
+
+// Raft service definition
+service RaftService {
+    // Leader election RPCs
+    rpc RequestVote(RequestVoteRequest) returns (RequestVoteResponse);
+    
+    // Log replication RPCs
+    rpc AppendEntries(AppendEntriesRequest) returns (AppendEntriesResponse);
+    
+    // Snapshot RPCs
+    rpc InstallSnapshot(InstallSnapshotRequest) returns (InstallSnapshotResponse);
+    
+    // Client request forwarding
+    rpc ForwardRequest(ForwardRequestMessage) returns (ForwardRequestResponse);
+    
+    // Membership changes
+    rpc AddServer(AddServerRequest) returns (AddServerResponse);
+    rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
+    
+    // Health check
+    rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+// Log entry structure
+message LogEntry {
+    uint64 index = 1;
+    uint64 term = 2;
+    string command = 3;  // JSON-encoded command
+    string client_id = 4;
+    string request_id = 5;
+}
+
+// Request Vote RPC
+message RequestVoteRequest {
+    string from_node = 1;
+    string to_node = 2;
+    uint64 term = 3;
+    uint64 last_log_index = 4;
+    uint64 last_log_term = 5;
+}
+
+message RequestVoteResponse {
+    string from_node = 1;
+    string to_node = 2;
+    uint64 term = 3;
+    bool vote_granted = 4;
+}
+
+// Append Entries RPC
+message AppendEntriesRequest {
+    string from_node = 1;
+    string to_node = 2;
+    uint64 term = 3;
+    uint64 prev_log_index = 4;
+    uint64 prev_log_term = 5;
+    repeated LogEntry entries = 6;
+    uint64 leader_commit = 7;
+}
+
+message AppendEntriesResponse {
+    string from_node = 1;
+    string to_node = 2;
+    uint64 term = 3;
+    bool success = 4;
+    uint64 match_index = 5;
+    uint64 conflict_index = 6;  // For faster log reconciliation
+    uint64 conflict_term = 7;
+}
+
+// Install Snapshot RPC
+message InstallSnapshotRequest {
+    string from_node = 1;
+    string to_node = 2;
+    uint64 term = 3;
+    uint64 last_included_index = 4;
+    uint64 last_included_term = 5;
+    uint64 offset = 6;
+    bytes data = 7;
+    bool done = 8;
+    repeated string configuration = 9;  // Cluster configuration
+}
+
+message InstallSnapshotResponse {
+    string from_node = 1;
+    string to_node = 2;
+    uint64 term = 3;
+    bool success = 4;
+}
+
+// Client request forwarding
+message ForwardRequestMessage {
+    string client_id = 1;
+    string request_id = 2;
+    string command = 3;  // JSON-encoded command
+}
+
+message ForwardRequestResponse {
+    bool success = 1;
+    string leader_id = 2;
+    string error = 3;
+    string result = 4;
+}
+
+// Membership changes
+message AddServerRequest {
+    string new_server = 1;
+    string server_address = 2;
+}
+
+message AddServerResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message RemoveServerRequest {
+    string server_id = 1;
+}
+
+message RemoveServerResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+// Health check
+message HealthCheckRequest {
+    string node_id = 1;
+}
+
+message HealthCheckResponse {
+    bool healthy = 1;
+    string state = 2;  // FOLLOWER, CANDIDATE, LEADER
+    uint64 current_term = 3;
+    string leader_id = 4;
+}
