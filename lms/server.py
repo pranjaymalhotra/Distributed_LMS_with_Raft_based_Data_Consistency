@@ -7,6 +7,7 @@ import grpc
 import json
 import os
 import threading
+import time
 from concurrent import futures
 from typing import Dict, List, Optional
 
@@ -16,9 +17,10 @@ from typing import Dict, List, Optional
 # import tutoring_pb2_grpc
 from lms import lms_pb2,lms_pb2_grpc
 from tutoring import tutoring_pb2,tutoring_pb2_grpc
-
+from lms.database import create_raft_command
 from lms.database import LMSDatabase
 from lms.auth import AuthManager, require_auth, require_instructor, require_student
+from raft.state import NodeState
 from common.logger import get_logger
 from common.constants import *
 from common.utils import (
@@ -79,6 +81,37 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
         """Set the Raft node reference"""
         self.raft_node = raft_node
         self.database.set_raft_node(raft_node)
+
+    def CheckLeadership(self, request, context):
+        """Check if this node is the current leader"""
+        try:
+            is_leader = (
+                self.raft_node and 
+                self.raft_node.state == NodeState.LEADER
+            )
+            
+            leader_id = ""
+            cluster_status = "unknown"
+            
+            if self.raft_node:
+                leader_id = self.raft_node.volatile_state.leader_id or ""
+                cluster_status = self.raft_node.state.value
+            
+            return lms_pb2.LeadershipResponse(
+                is_leader=is_leader,
+                leader_id=leader_id,
+                node_id=self.node_id,
+                #cluster_status=cluster_status
+            )
+        except Exception as e:
+            logger.error(f"CheckLeadership error: {e}")
+            return lms_pb2.LeadershipResponse(
+                is_leader=False,
+                leader_id="",
+                node_id=self.node_id,
+                #cluster_status="error"
+            )
+
     
     def _init_tutoring_client(self):
         """Initialize connection to tutoring server"""
@@ -92,24 +125,61 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
             logger.info(f"Connected to tutoring server at {address}")
         except Exception as e:
             logger.error(f"Failed to connect to tutoring server: {e}")
+
+    def RefreshToken(self, request, context):
+        """Handle token refresh request"""
+        try:
+            success, new_access_token, new_refresh_token, error = self.auth_manager.refresh_token(
+                request.refresh_token
+            )
+            
+            if success:
+                expires_in = self.auth_manager.token_expiry_hours * 3600
+                return lms_pb2.RefreshTokenResponse(
+                    success=True,
+                    access_token=new_access_token,
+                    refresh_token=new_refresh_token,
+                    expires_in=expires_in,
+                    error=""
+                )
+            else:
+                return lms_pb2.RefreshTokenResponse(
+                    success=False,
+                    access_token="",
+                    refresh_token="",
+                    expires_in=0,
+                    error=error or "Token refresh failed"
+                )
+                
+        except Exception as e:
+            logger.error(f"Token refresh error: {e}")
+            return lms_pb2.RefreshTokenResponse(
+                success=False,
+                access_token="",
+                refresh_token="",
+                expires_in=0,
+                error=str(e)
+            )
+
     
     # Authentication endpoints
     def Login(self, request, context):
         """Handle login request"""
         try:
-            success, token, user_id, error = self.auth_manager.login(
+            # ✅ Updated to handle 5 return values
+            success, access_token, refresh_token, user_id, error = self.auth_manager.login(
                 request.username,
                 request.password,
                 request.user_type
             )
-            
+
             return lms_pb2.LoginResponse(
                 success=success,
-                token=token if success else "",
+                token=access_token if success else "",  # Use access_token instead of token
                 error=error if error else "",
                 user_id=user_id if user_id else ""
             )
-            
+
         except Exception as e:
             logger.error(f"Login error: {e}")
             return lms_pb2.LoginResponse(
@@ -118,6 +188,7 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
                 error=str(e),
                 user_id=""
             )
+
     
     def Logout(self, request, context):
         """Handle logout request"""
@@ -135,135 +206,133 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
                 success=False,
                 error=str(e)
             )
-    
+
+
+    def _forward_to_leader(self, command: Dict, client_id: str, request_id: str) -> tuple:
+        """Forward request to the leader if we're not the leader"""
+        if not self.raft_node:
+            return False, None, "Raft node not initialized"
+        
+        # If we're the leader, process directly
+        if self.raft_node.state == NodeState.LEADER:
+            return self.raft_node.handle_client_request(command, client_id, request_id)
+        
+        # We're not the leader, forward to leader
+        leader_id = self.raft_node.volatile_state.leader_id
+        if not leader_id:
+            return False, None, "No leader known"
+        
+        # Find leader's node config
+        leader_config = None
+        for node_id, node_info in self.config['cluster']['nodes'].items():
+            if node_id == leader_id:
+                leader_config = node_info
+                break
+        
+        if not leader_config:
+            return False, None, f"Leader {leader_id} not in configuration"
+        
+        # Connect to leader's Raft service
+        leader_address = f"{leader_config['host']}:{leader_config['raft_port']}"
+        
+        try:
+            print(f"🔧 DEBUG: Forwarding request to leader at {leader_address}")
+            channel = grpc.insecure_channel(leader_address)
+            stub = raft_pb2_grpc.RaftServiceStub(channel)
+            
+            # Convert command to JSON
+            command_json = json.dumps(command)
+            
+            # Create forward request
+            forward_request = raft_pb2.ForwardRequestMessage(
+                client_id=client_id,
+                request_id=request_id,
+                command=command_json
+            )
+            
+            # Send to leader
+            response = stub.ForwardRequest(forward_request, timeout=60)
+            
+            # Close channel
+            channel.close()
+            
+            if response.success:
+                return True, response.result, None
+            else:
+                return False, None, response.error
+                
+        except Exception as e:
+            return False, None, f"Forward error: {str(e)}"
+            
     # Data operations
     # @require_auth(auth_manager)
     @require_auth(lambda self: self.auth_manager)
     def Post(self, request, context):
-        """Handle post request for creating data"""
+        """Handle Post request"""
         try:
             user = context.user
-            data = json.loads(request.data) if request.data else {}
             
-            if request.type == DATA_TYPE_ASSIGNMENT:
-                # Only instructors can create assignments
-                if not self.auth_manager.can_create_assignment(user):
-                    context.abort(grpc.StatusCode.PERMISSION_DENIED, ERROR_NOT_AUTHORIZED)
-                
-                # Handle file if provided
-                file_path = None
-                if request.file_data:
-                    file_path = self._save_assignment_file(
-                        request.filename,
-                        request.file_data,
-                        data.get('assignment_id', generate_id())
-                    )
-                
-                assignment_id = self.database.create_assignment(
-                    title=data['title'],
-                    description=data['description'],
-                    due_date=data['due_date'],
-                    created_by=user.user_id,
-                    file_path=file_path
+            # Check if we're the leader
+            if not self.raft_node or self.raft_node.state != NodeState.LEADER:
+                leader_id = self.raft_node.volatile_state.leader_id if self.raft_node else ""
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    f"Not leader. Please retry. Current leader: {leader_id}"
                 )
+            
+            # Parse data
+            try:
+                data = json.loads(request.data)
+            except json.JSONDecodeError:
+                return lms_pb2.PostResponse(
+                    success=False,
+                    error="Invalid JSON data",
+                    id=""
+                )
+            
+            # Create Raft command with correct number of arguments
+            command = create_raft_command("POST", request.type, data, user.user_id)
+            
+            # Forward to Raft for consensus
+            success, result, error = self.raft_node.handle_client_request(
+                command, user.user_id, generate_id()
+            )
+            
+            if success:
+                # Extract ID from result
+                result_data = json.loads(result) if result else {}
+                resource_id = result_data.get('id', '')
+                
+                # Handle file data if present
+                if request.file_data and request.filename:
+                    if request.type == "assignment":
+                        file_path = self._save_assignment_file(
+                            request.filename, request.file_data, resource_id
+                        )
+                    elif request.type == "submission":
+                        file_path = self._save_submission_file(
+                            request.filename, request.file_data, user.user_id, 
+                            data.get('assignment_id', '')
+                        )
+                    elif request.type == "course_material":
+                        file_path = self._save_course_material(
+                            request.filename, request.file_data
+                        )
                 
                 return lms_pb2.PostResponse(
                     success=True,
                     error="",
-                    id=assignment_id
+                    id=resource_id
                 )
-            
-            elif request.type == DATA_TYPE_SUBMISSION:
-                # Only students can submit assignments
-                if not self.auth_manager.can_submit_assignment(user):
-                    context.abort(grpc.StatusCode.PERMISSION_DENIED, ERROR_NOT_AUTHORIZED)
-                
-                # Handle file if provided
-                file_path = None
-                if request.file_data:
-                    file_path = self._save_submission_file(
-                        request.filename,
-                        request.file_data,
-                        user.user_id,
-                        data['assignment_id']
-                    )
-                
-                submission_id = self.database.submit_assignment(
-                    assignment_id=data['assignment_id'],
-                    student_id=user.user_id,
-                    content=data.get('content', ''),
-                    file_path=file_path
-                )
-                
-                return lms_pb2.PostResponse(
-                    success=True,
-                    error="",
-                    id=submission_id
-                )
-            
-            elif request.type == DATA_TYPE_QUERY:
-                # Only students can post queries
-                if not self.auth_manager.can_post_query(user):
-                    context.abort(grpc.StatusCode.PERMISSION_DENIED, ERROR_NOT_AUTHORIZED)
-                
-                query_id = self.database.post_query(
-                    student_id=user.user_id,
-                    query=data['query'],
-                    use_llm=data.get('use_llm', False)
-                )
-                
-                # If LLM requested, send to tutoring server
-                if data.get('use_llm', False):
-                    self._request_llm_answer(query_id, data['query'], user.user_id)
-                
-                return lms_pb2.PostResponse(
-                    success=True,
-                    error="",
-                    id=query_id
-                )
-            
-            elif request.type == DATA_TYPE_COURSE_MATERIAL:
-                # Only instructors can upload materials
-                if not self.auth_manager.can_upload_material(user):
-                    context.abort(grpc.StatusCode.PERMISSION_DENIED, ERROR_NOT_AUTHORIZED)
-                
-                # Validate file type
-                if not (is_pdf_file(request.filename) or is_text_file(request.filename)):
-                    context.abort(grpc.StatusCode.INVALID_ARGUMENT, ERROR_INVALID_FILE_TYPE)
-                
-                # Save file
-                file_path = self._save_course_material(
-                    request.filename,
-                    request.file_data
-                )
-                
-                material_id = self.database.upload_course_material(
-                    filename=request.filename,
-                    file_type=FILE_TYPE_PDF if is_pdf_file(request.filename) else FILE_TYPE_TXT,
-                    topic=data.get('topic', 'General'),
-                    file_path=file_path,
-                    uploaded_by=user.user_id
-                )
-                
-                # Process material for LLM context
-                self._process_course_material(material_id, request.filename, 
-                                            request.file_data, file_path)
-                
-                return lms_pb2.PostResponse(
-                    success=True,
-                    error="",
-                    id=material_id
-                )
-            
             else:
                 return lms_pb2.PostResponse(
                     success=False,
-                    error=f"Unknown data type: {request.type}",
+                    error=error or "Unknown error",
                     id=""
                 )
                 
         except Exception as e:
-            logger.error(f"Post error: {e}")
+            logger.error(f"Post request error: {e}")
             return lms_pb2.PostResponse(
                 success=False,
                 error=str(e),
@@ -273,107 +342,83 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
     # @require_auth(auth_manager)
     @require_auth(lambda self: self.auth_manager)
     def Get(self, request, context):
-        """Handle get request for retrieving data"""
+        """Handle Get request"""
         try:
             user = context.user
-            filter_data = json.loads(request.filter) if request.filter else {}
+            
+            # Check if we're the leader for read operations (optional, depends on consistency requirements)
+            if not self.raft_node or self.raft_node.state != NodeState.LEADER:
+                # For reads, you might want to allow followers, but for strong consistency, redirect to leader
+                leader_id = self.raft_node.volatile_state.leader_id if self.raft_node else ""
+                context.abort(
+                    grpc.StatusCode.FAILED_PRECONDITION,
+                    f"Not leader. Please retry. Current leader: {leader_id}"
+                )
+            
+            # Parse filter
+            filter_data = {}
+            if request.filter:
+                try:
+                    filter_data = json.loads(request.filter)
+                except json.JSONDecodeError:
+                    pass
+            
+            # Get data based on type and user permissions
             items = []
             
-            if request.type == DATA_TYPE_ASSIGNMENT:
-                # All users can view assignments
-                assignments = self.database.get_assignments()
-                
+            if request.type == "assignments":
+                assignments = self.database.get_assignments(user.user_id, user.user_type)
                 for assignment in assignments:
                     items.append(lms_pb2.DataItem(
-                        id=assignment.assignment_id,
-                        type=DATA_TYPE_ASSIGNMENT,
-                        data=json.dumps(assignment.to_dict())
+                        id=assignment.get('assignment_id', ''),
+                        type="assignment",
+                        data=json.dumps(assignment)
                     ))
-            
-            elif request.type == DATA_TYPE_SUBMISSION:
-                # Get submissions based on user type and filter
-                if self.auth_manager.can_view_all_submissions(user):
-                    # Instructors can view all submissions
-                    if 'assignment_id' in filter_data:
-                        submissions = self.database.get_assignment_submissions(
-                            filter_data['assignment_id']
-                        )
-                    elif 'student_id' in filter_data:
-                        submissions = self.database.get_student_submissions(
-                            filter_data['student_id']
-                        )
-                    else:
-                        # Get all submissions (this could be large)
-                        submissions = []
-                        for assignment in self.database.get_assignments():
-                            submissions.extend(
-                                self.database.get_assignment_submissions(
-                                    assignment.assignment_id
-                                )
-                            )
-                else:
-                    # Students can only view their own submissions
+                    
+            elif request.type == "submissions":
+                if user.user_type == USER_TYPE_STUDENT:
                     submissions = self.database.get_student_submissions(user.user_id)
+                else:  # Instructor
+                    assignment_id = filter_data.get('assignment_id')
+                    submissions = self.database.get_submissions(assignment_id)
                 
                 for submission in submissions:
                     items.append(lms_pb2.DataItem(
-                        id=submission.submission_id,
-                        type=DATA_TYPE_SUBMISSION,
-                        data=json.dumps(submission.to_dict())
+                        id=submission.get('submission_id', ''),
+                        type="submission",
+                        data=json.dumps(submission)
                     ))
-            
-            elif request.type == DATA_TYPE_QUERY:
-                # Get queries
-                if self.auth_manager.is_instructor(user):
-                    # Instructors see all queries
-                    queries = self.database.get_queries()
-                else:
-                    # Students see only their queries
-                    queries = self.database.get_queries(student_id=user.user_id)
+                    
+            elif request.type == "queries":
+                if user.user_type == USER_TYPE_STUDENT:
+                    queries = self.database.get_student_queries(user.user_id)
+                else:  # Instructor
+                    queries = self.database.get_all_queries()
                 
                 for query in queries:
                     items.append(lms_pb2.DataItem(
-                        id=query.query_id,
-                        type=DATA_TYPE_QUERY,
-                        data=json.dumps(query.to_dict())
+                        id=query.get('query_id', ''),
+                        type="query",
+                        data=json.dumps(query)
                     ))
-            
-            elif request.type == DATA_TYPE_COURSE_MATERIAL:
-                # All users can view course materials
+                    
+            elif request.type == "course_materials":
                 materials = self.database.get_course_materials()
-                
                 for material in materials:
                     items.append(lms_pb2.DataItem(
-                        id=material.material_id,
-                        type=DATA_TYPE_COURSE_MATERIAL,
-                        data=json.dumps(material.to_dict())
+                        id=material.get('material_id', ''),
+                        type="course_material",
+                        data=json.dumps(material)
                     ))
-            
-            elif request.type == DATA_TYPE_STUDENTS:
-                # Only instructors can view all students
-                if not self.auth_manager.can_view_all_students(user):
-                    context.abort(grpc.StatusCode.PERMISSION_DENIED, ERROR_NOT_AUTHORIZED)
-                
-                students = self.database.get_all_students()
-                
-                for student in students:
-                    # Include progress information
-                    progress = self.database.get_student_progress(student.user_id)
-                    student_data = student.to_dict()
-                    student_data['progress'] = progress.to_dict()
                     
+            elif request.type == "students" and user.user_type == USER_TYPE_INSTRUCTOR:
+                students = self.database.get_all_students()
+                for student in students:
                     items.append(lms_pb2.DataItem(
-                        id=student.user_id,
-                        type=DATA_TYPE_STUDENTS,
-                        data=json.dumps(student_data)
+                        id=student.get('user_id', ''),
+                        type="student",
+                        data=json.dumps(student)
                     ))
-            
-            else:
-                return lms_pb2.GetResponse(
-                    success=False,
-                    error=f"Unknown data type: {request.type}",
-                    items=[]
-                )
             
             return lms_pb2.GetResponse(
                 success=True,
@@ -382,8 +427,12 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
             )
             
         except Exception as e:
-            logger.error(f"Get error: {e}")
-            context.abort(grpc.StatusCode.INTERNAL, str(e))
+            logger.error(f"Get request error: {e}")
+            return lms_pb2.GetResponse(
+                success=False,
+                error=str(e),
+                items=[]
+            )
     
     # @require_instructor(auth_manager)
     @require_instructor(lambda self: self.auth_manager)
@@ -392,61 +441,172 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
         try:
             user = context.user
             
-            # Grade the assignment
-            self.database.grade_assignment(
-                submission_id=request.submission_id,
-                grade=request.grade,
-                feedback=request.feedback,
-                graded_by=user.user_id
+            # Create Raft command
+            command = create_raft_command(RAFT_CMD_GRADE_ASSIGNMENT, {
+                'submission_id': request.submission_id,
+                'grade': request.grade,
+                'feedback': request.feedback,
+                'graded_by': user.user_id
+            })
+            
+            # Submit through Raft with leader forwarding
+            success, result, error = self._forward_to_leader(
+                command, user.user_id, generate_id()
             )
             
-            return lms_pb2.GradeResponse(
-                success=True,
-                error=""
-            )
-            
+            if success:
+                return lms_pb2.GradeResponse(
+                    success=True,
+                    error=""
+                )
+            else:
+                return lms_pb2.GradeResponse(
+                    success=False,
+                    error=error or "Failed to submit grade"
+                )
+                
         except Exception as e:
             logger.error(f"Grade submission error: {e}")
             return lms_pb2.GradeResponse(
                 success=False,
                 error=str(e)
             )
-    
     # @require_auth(auth_manager)
     @require_auth(lambda self: self.auth_manager)
     def PostQuery(self, request, context):
-        """Handle query posting"""
+        """Handle PostQuery request"""
         try:
             user = context.user
+            logger.info(f"PostQuery: Received from user {user.user_id}")
             
             # Only students can post queries
-            if not self.auth_manager.can_post_query(user):
-                context.abort(grpc.StatusCode.PERMISSION_DENIED, ERROR_NOT_AUTHORIZED)
+            if user.user_type != USER_TYPE_STUDENT:
+                context.abort(grpc.StatusCode.PERMISSION_DENIED, "Only students can post queries")
             
-            query_id = self.database.post_query(
-                student_id=user.user_id,
-                query=request.query,
-                use_llm=request.use_llm
-            )
+            # Create query data
+            query_data = {
+                'query_id': generate_id(),
+                'query': request.query,
+                'use_llm': request.use_llm,
+                'student_id': user.user_id
+            }
             
-            # If LLM requested, send to tutoring server
-            if request.use_llm:
-                self._request_llm_answer(query_id, request.query, user.user_id)
+            # Create Raft command
+            command = create_raft_command("POST", "query", query_data, user.user_id)
             
-            return lms_pb2.QueryResponse(
-                success=True,
-                error="",
-                query_id=query_id
-            )
+            # Submit through Raft with leader forwarding
+            success, result, error = self._forward_to_leader(command, user.user_id, generate_id())
             
+            if success:
+                result_data = json.loads(result) if result else {}
+                query_id = result_data.get('id', '')
+                
+                # If using LLM, request answer asynchronously
+                if request.use_llm:
+                    threading.Thread(
+                        target=self._request_llm_answer,
+                        args=(query_id, request.query, user.user_id),
+                        daemon=True
+                    ).start()
+                
+                return lms_pb2.QueryResponse(
+                    success=True,
+                    error="",
+                    query_id=query_id
+                )
+            else:
+                return lms_pb2.QueryResponse(
+                    success=False,
+                    error=error or "Unknown error",
+                    query_id=""
+                )
+                
         except Exception as e:
-            logger.error(f"Query posting error: {e}")
+            logger.error(f"PostQuery error: {e}")
             return lms_pb2.QueryResponse(
                 success=False,
                 error=str(e),
                 query_id=""
             )
-    
+    def _request_llm_answer(self, query_id: str, query: str, student_id: str):
+        """Request answer from LLM tutoring server with detailed logging"""
+        logger.info(f"🎯 LLM Request: Starting for query {query_id}")
+        
+        if not self.tutoring_client:
+            logger.error("❌ LLM Request: Tutoring client not available")
+            return
+        
+        try:
+            # Get student context
+            student_level = self._get_student_level(student_id)
+            
+            # Create LLM request
+            context = tutoring_pb2.StudentContext(
+                student_level=student_level,
+                course_materials=[],
+                average_grade=85.0
+            )
+            
+            request = tutoring_pb2.LLMRequest(
+                query_id=query_id,
+                query=query,
+                student_id=student_id,
+                context=context
+            )
+            
+            logger.info(f"📤 LLM Request: Sending to tutoring server...")
+            start_time = time.time()
+            
+            # Send to Tutoring Server
+            response = self.tutoring_client.GetLLMAnswer(request, timeout=300)
+            
+            llm_time = time.time() - start_time
+            logger.info(f"⚡ LLM Request: Tutoring server responded in {llm_time:.2f}s")
+            
+            if response.success:
+                logger.info(f"✅ LLM Request: Got answer for {query_id}")
+                
+                # Update query with LLM answer through Raft
+                answer_command = create_raft_command(
+                    "PUT", 
+                    "query_answer",
+                    {
+                        'query_id': query_id,
+                        'answer': response.answer,
+                        'answered_by': 'AI_TUTOR',
+                        'answered_at': time.time()
+                    },
+                    'system'
+                )
+                
+                logger.info(f"🔗 LLM Request: Updating answer via Raft...")
+                # ✅ Remove timeout parameter
+                success, result, error = self.raft_node.handle_client_request(
+                    answer_command, 'system', generate_id()
+                )
+                
+                if success:
+                    logger.info(f"✅ LLM Request: Answer successfully stored for {query_id}")
+                else:
+                    logger.error(f"❌ LLM Request: Failed to store answer: {error}")
+            else:
+                logger.error(f"❌ LLM Request: Tutoring server error: {response.error}")
+            
+        except Exception as e:
+            logger.error(f"💥 LLM Request: Exception: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+
+    def _get_student_level(self, student_id: str) -> str:
+        """Get student level from state machine"""
+        try:
+            if self.raft_node and hasattr(self.raft_node, 'state_machine'):
+                return self.raft_node.state_machine.get_student_level(student_id)
+            return 'intermediate'  # Default
+        except Exception as e:
+            logger.error(f"Error getting student level: {e}")
+            return 'intermediate'
+
     def GetLLMAnswer(self, request, context):
         """Handle LLM answer response from tutoring server"""
         try:
@@ -583,62 +743,7 @@ class LMSServer(lms_pb2_grpc.LMSServiceServicer):
         file_path = os.path.join(self.materials_dir, f"{material_id}_{filename}")
         save_file(data, file_path)
         return file_path
-    
-    def _request_llm_answer(self, query_id: str, query: str, student_id: str):
-        """Request answer from LLM tutoring server"""
-        if not self.tutoring_client:
-            logger.warning("Tutoring client not initialized")
-            return
-        
-        try:
-            # Prepare context
-            student_level = self.database.get_student_level(student_id)
-            progress = self.database.get_student_progress(student_id)
-            
-            # Get recent grades
-            submissions = self.database.get_student_submissions(student_id)
-            recent_grades = []
-            for submission in submissions[-5:]:  # Last 5 submissions
-                if submission.grade is not None:
-                    recent_grades.append(tutoring_pb2.GradeInfo(
-                        assignment_id=submission.assignment_id,
-                        grade=submission.grade,
-                        topic=""  # Would need to get from assignment
-                    ))
-            
-            # Get relevant course materials
-            materials = self.database.get_course_materials()
-            material_ids = [m.material_id for m in materials[:5]]  # Top 5 materials
-            
-            # Create context
-            context = tutoring_pb2.StudentContext(
-                student_level=student_level,
-                relevant_materials=material_ids,
-                recent_grades=recent_grades,
-                course_context=json.dumps({
-                    'average_grade': progress.average_grade,
-                    'total_assignments': progress.total_assignments
-                })
-            )
-            
-            # Send request
-            request = tutoring_pb2.LLMRequest(
-                query_id=query_id,
-                query=query,
-                student_id=student_id,
-                context=context
-            )
-            
-            # Make async call
-            threading.Thread(
-                target=self._call_tutoring_server,
-                args=(request,),
-                daemon=True
-            ).start()
-            
-        except Exception as e:
-            logger.error(f"Failed to request LLM answer: {e}")
-    
+
     def _call_tutoring_server(self, request):
         """Make async call to tutoring server"""
         try:

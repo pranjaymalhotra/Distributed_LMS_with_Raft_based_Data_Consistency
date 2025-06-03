@@ -5,6 +5,7 @@ Provides an interface between the LMS server and the Raft state machine.
 
 import os
 import json
+import time
 import threading
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, asdict
@@ -135,6 +136,76 @@ class LMSDatabase:
         
         # Load local data
         self._load_local_data()
+
+    def create_token_pair(self, user_id: str, access_token: str, refresh_token: str, expires_at: float):
+        """Create access and refresh token pair"""
+        with self.lock:
+            self.tokens[access_token] = {
+                'user_id': user_id,
+                'created_at': timestamp(),
+                'expires_at': expires_at,
+                'refresh_token': refresh_token
+            }
+            self._save_tokens()
+
+    def get_user_id_by_refresh_token(self, refresh_token: str) -> Optional[str]:
+        """Get user ID by refresh token"""
+        with self.lock:
+            for token_data in self.tokens.values():
+                if token_data.get('refresh_token') == refresh_token:
+                    return token_data['user_id']
+            return None
+
+    def get_access_token_by_refresh_token(self, refresh_token: str) -> Optional[str]:
+        """Get access token by refresh token"""
+        with self.lock:
+            for access_token, token_data in self.tokens.items():
+                if token_data.get('refresh_token') == refresh_token:
+                    return access_token
+            return None
+
+    def is_refresh_token_expired(self, refresh_token: str, expiry_days: int) -> bool:
+        """Check if refresh token is expired"""
+        with self.lock:
+            for token_data in self.tokens.values():
+                if token_data.get('refresh_token') == refresh_token:
+                    created_at = token_data['created_at']
+                    return timestamp() > created_at + (expiry_days * 24 * 3600)
+            return True
+
+    def refresh_token_pair(self, user_id: str, old_refresh_token: str, 
+                        new_access_token: str, new_refresh_token: str, expires_at: float):
+        """Replace old token pair with new one"""
+        with self.lock:
+            # Remove old tokens
+            tokens_to_remove = []
+            for access_token, token_data in self.tokens.items():
+                if token_data.get('refresh_token') == old_refresh_token:
+                    tokens_to_remove.append(access_token)
+            
+            for token in tokens_to_remove:
+                del self.tokens[token]
+            
+            # Add new token pair
+            self.tokens[new_access_token] = {
+                'user_id': user_id,
+                'created_at': timestamp(),
+                'expires_at': expires_at,
+                'refresh_token': new_refresh_token
+            }
+            self._save_tokens()
+
+    def delete_refresh_token(self, refresh_token: str):
+        """Delete refresh token and associated access token"""
+        with self.lock:
+            tokens_to_remove = []
+            for access_token, token_data in self.tokens.items():
+                if token_data.get('refresh_token') == refresh_token:
+                    tokens_to_remove.append(access_token)
+            
+            for token in tokens_to_remove:
+                del self.tokens[token]
+            self._save_tokens()
     
     def set_raft_node(self, raft_node):
         """Set the Raft node reference"""
@@ -499,10 +570,22 @@ class LMSDatabase:
                 pass
 
 
-def create_raft_command(command_type: str, data: Dict[str, Any]) -> Dict[str, Any]:
-    """Create a Raft command for state machine"""
+def create_raft_command(operation: str, resource_type: str, data: Dict, user_id: str) -> Dict:
+    """Create a Raft command for consensus"""
+    print(f"🔧 DEBUG: Creating Raft command - about to call time.time()")
+    import time
+    try:
+        timestamp = time.time()
+        print(f"✅ DEBUG: time.time() succeeded: {timestamp}")
+    except NameError as e:
+        print(f"❌ DEBUG: time.time() failed in create_raft_command: {e}")
+        raise
+    
     return {
-        'type': command_type,
-        'timestamp': timestamp(),
-        **data
+        'operation': operation,
+        'resource_type': resource_type,
+        'data': data,
+        'user_id': user_id,
+        'timestamp': timestamp,
+        'command_id': generate_id()
     }

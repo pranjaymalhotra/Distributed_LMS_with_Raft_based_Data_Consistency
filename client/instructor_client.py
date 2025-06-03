@@ -7,15 +7,19 @@ import os
 from typing import List, Optional
 from datetime import datetime
 import json
-
-from client.base_client import BaseLMSClient
+import grpc
+from lms import lms_pb2, lms_pb2_grpc
+#from client.base_client import BaseLMSClient
+from client.enhanced_base_client import EnhancedBaseLMSClient
 from common.constants import *
 from common.logger import get_logger
+import time
+
 
 logger = get_logger(__name__)
 
 
-class InstructorClient(BaseLMSClient):
+class InstructorClient(EnhancedBaseLMSClient):
     """
     Client application for instructors.
     """
@@ -619,18 +623,46 @@ def main():
     print("DISTRIBUTED LMS - INSTRUCTOR CLIENT")
     print("="*50)
     
-    # Get server addresses from config or use defaults
-    server_addresses = [
-        "localhost:6001",
-        "localhost:6002",
-        "localhost:6003",
-        "localhost:6004",
-        "localhost:6005"
-    ]
+    # Load configuration to get proper server addresses
+    try:
+        import json
+        import os
+        
+        # Get config path relative to project root
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+            'config.json'
+        )
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Extract server addresses from config
+        server_addresses = []
+        nodes = config['cluster']['nodes']
+        for node_id, node_config in nodes.items():
+            address = f"{node_config['host']}:{node_config['lms_port']}"
+            server_addresses.append(address)
+            
+        logger.info(f"Loaded server addresses from config: {server_addresses}")
+        
+    except Exception as e:
+        logger.warning(f"Could not load config, using defaults: {e}")
+        # Fallback to default addresses
+        server_addresses = [
+            "localhost:6001",
+            "localhost:6002", 
+            "localhost:6003",
+            "localhost:6004"
+        ]
     
     # Create client
     client = InstructorClient(server_addresses)
     
+    # Pass config to client for leader discovery
+    if 'config' in locals():
+        client.set_config(config)
+
     if not client.is_connected():
         print("Failed to connect to any LMS server.")
         return

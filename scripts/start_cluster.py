@@ -26,6 +26,9 @@ def load_config() -> Dict:
 
 def start_lms_node(node_id: str, node_config: Dict, config: Dict) -> subprocess.Popen:
     """Start a single LMS node with Raft"""
+    # Convert config to a proper Python representation
+    config_repr = repr(config)
+    
     cmd = [
         sys.executable,
         "-c",
@@ -43,8 +46,8 @@ from raft.rpc import RaftRPCServer
 from lms.server import LMSServer
 from common.logger import setup_logging
 
-# Setup logging
-config = {json.dumps(config)}
+# Setup logging - use proper Python dict representation
+config = {config_repr}
 setup_logging(config['logging'])
 
 # Extract peer addresses for Raft
@@ -98,6 +101,7 @@ except KeyboardInterrupt:
 def start_tutoring_server(config: Dict) -> subprocess.Popen:
     """Start the tutoring server"""
     tutoring_config = config['cluster']['tutoring_server']
+    config_repr = repr(config)
     
     cmd = [
         sys.executable,
@@ -109,8 +113,8 @@ sys.path.append('{os.path.dirname(os.path.dirname(os.path.abspath(__file__)))}')
 from tutoring.server import TutoringServer
 from common.logger import setup_logging
 
-# Setup logging
-config = {json.dumps(config)}
+# Setup logging - use proper Python dict representation
+config = {config_repr}
 setup_logging(config['logging'])
 
 # Create and start tutoring server
@@ -146,17 +150,17 @@ def main():
     print("STARTING DISTRIBUTED LMS CLUSTER")
     print("="*60)
     
-    # Load configuration
-    config = load_config()
-    
-    # Setup logging
-    setup_logging(config['logging'])
-    logger = get_logger(__name__)
-    
-    # Store process handles
-    processes = []
-    
     try:
+        # Load configuration
+        config = load_config()
+        
+        # Setup logging
+        setup_logging(config['logging'])
+        logger = get_logger(__name__)
+        
+        # Store process handles
+        processes = []
+        
         # Start tutoring server first
         print("\n1. Starting Tutoring Server...")
         tutoring_process = start_tutoring_server(config)
@@ -227,6 +231,8 @@ def main():
         
     except Exception as e:
         print(f"\n❌ Error starting cluster: {e}")
+        import traceback
+        traceback.print_exc()
         
         # Clean up any started processes
         for name, process in processes:

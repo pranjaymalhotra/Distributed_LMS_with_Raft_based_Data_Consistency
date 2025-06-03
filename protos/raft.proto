@@ -22,6 +22,18 @@ service RaftService {
     
     // Health check
     rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+    rpc GetLeaderInfo(LeaderInfoRequest) returns (LeaderInfoResponse);
+}
+
+message LeaderInfoRequest {
+    string requesting_node = 1;
+}
+
+message LeaderInfoResponse {
+    bool is_leader = 1;
+    string leader_id = 2;
+    int64 current_term = 3;
+    string node_id = 4;
 }
 
 // Log entry structure

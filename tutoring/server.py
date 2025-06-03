@@ -6,9 +6,11 @@ Provides adaptive LLM-based tutoring for students.
 import grpc
 import json
 import os
+import time
 import threading
 from concurrent import futures
 from typing import Dict, List, Optional
+from lms import lms_pb2,lms_pb2_grpc
 
 # import tutoring_pb2
 # import tutoring_pb2_grpc
@@ -205,50 +207,43 @@ class TutoringServer(tutoring_pb2_grpc.TutoringServiceServicer):
             )
     
     def _build_full_context(self, query: str, student_id: str, 
-                           student_context: tutoring_pb2.StudentContext) -> str:
+                        student_context: str) -> str:
         """Build complete context for LLM"""
         try:
-            context_parts = []
+            # Parse context if it's JSON
+            if isinstance(student_context, str):
+                try:
+                    context_data = json.loads(student_context)
+                except:
+                    context_data = {'student_level': 'intermediate'}
+            else:
+                context_data = student_context
             
-            # Add student information
-            context_parts.append(f"Student Level: {student_context.student_level}")
+            student_level = context_data.get('student_level', 'intermediate')
             
-            # Parse course context
-            if student_context.course_context:
-                course_info = json.loads(student_context.course_context)
-                context_parts.append(
-                    f"Student Performance: Average Grade {course_info.get('average_grade', 0):.1f}%, "
-                    f"Completed {course_info.get('total_assignments', 0)} assignments"
-                )
+            # Build context from course materials
+            context_parts = [f"Student Level: {student_level}"]
             
-            # Add recent grades context
-            if student_context.recent_grades:
-                grades_text = "Recent Grades: "
-                grades = [f"{g.grade:.1f}%" for g in student_context.recent_grades]
-                grades_text += ", ".join(grades)
-                context_parts.append(grades_text)
-            
-            # Add relevant course materials
-            relevant_content = []
+            # Find relevant materials
             with self.materials_lock:
-                for material_id in student_context.relevant_materials:
-                    if material_id in self.processed_materials:
-                        material = self.processed_materials[material_id]
-                        # Find relevant sections based on query
-                        relevant_sections = self.context_builder.find_relevant_sections(
-                            query, material
-                        )
-                        relevant_content.extend(relevant_sections)
+                relevant_materials = []
+                for material_id, material in self.processed_materials.items():
+                    relevant_sections = self.context_builder.find_relevant_sections(
+                        query, material, max_sections=2
+                    )
+                    if relevant_sections:
+                        relevant_materials.extend(relevant_sections)
             
-            if relevant_content:
-                context_parts.append("Relevant Course Content:")
-                context_parts.extend(relevant_content[:3])  # Limit to top 3 sections
+            if relevant_materials:
+                context_parts.append("Relevant Course Materials:")
+                for i, material in enumerate(relevant_materials[:3], 1):
+                    context_parts.append(f"{i}. {material[:200]}...")
             
             return "\n\n".join(context_parts)
             
         except Exception as e:
             logger.error(f"Error building context: {e}")
-            return ""
+            return f"Student Level: intermediate\n\nQuery: {query}"
     
     def _extract_references(self, response: str) -> List[str]:
         """Extract material references from response"""
@@ -265,33 +260,29 @@ class TutoringServer(tutoring_pb2_grpc.TutoringServiceServicer):
     def _send_answer_to_lms(self, query_id: str, answer: str, student_id: str):
         """Send answer back to LMS server"""
         try:
-            # Try each LMS client until one succeeds
-            for node_id, stub in self.lms_clients.items():
+            # Try each LMS server until we find the leader
+            for node_id, client in self.lms_clients.items():
                 try:
-                    request = lms_pb2.LLMQueryRequest(
-                        query_id=query_id,
-                        query="",  # Not needed for response
-                        context=json.dumps({
-                            'answer': answer,
-                            'answered_by': QUERY_SOURCE_LLM
-                        })
+                    request = lms_pb2.LLMQueryResponse(
+                        success=True,
+                        error="",
+                        answer=answer
                     )
                     
-                    response = stub.GetLLMAnswer(request, timeout=5)
+                    # This would be a callback to update the query in the LMS
+                    # For now, just log it
+                    logger.info(f"Sending answer for query {query_id} to LMS")
+                    return
                     
-                    if response.success:
-                        logger.info(f"Successfully sent answer to LMS node {node_id}")
-                        return
-                        
                 except Exception as e:
-                    logger.debug(f"Failed to send to LMS node {node_id}: {e}")
+                    logger.debug(f"Failed to send to {node_id}: {e}")
                     continue
             
-            logger.error("Failed to send answer to any LMS node")
+            logger.error(f"Failed to send answer for query {query_id} to any LMS server")
             
         except Exception as e:
             logger.error(f"Error sending answer to LMS: {e}")
-    
+
     def start(self, port: int):
         """Start the gRPC server"""
         self.server = grpc.server(
@@ -299,6 +290,13 @@ class TutoringServer(tutoring_pb2_grpc.TutoringServiceServicer):
             options=[
                 ('grpc.max_send_message_length', 50 * 1024 * 1024),
                 ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+                ('grpc.keepalive_time_ms', 30000),
+                ('grpc.keepalive_timeout_ms', 5000),
+                ('grpc.keepalive_permit_without_calls', True),
+                ('grpc.http2.max_pings_without_data', 0),
+                ('grpc.http2.min_time_between_pings_ms', 10000),
+                ('grpc.http2.min_ping_interval_without_data_ms', 300000),
+                ('grpc.http2.max_ping_strikes', 0),
             ]
         )
         
@@ -307,7 +305,7 @@ class TutoringServer(tutoring_pb2_grpc.TutoringServiceServicer):
         self.server.add_insecure_port(f'[::]:{port}')
         self.server.start()
         
-        logger.info(f"Tutoring server started on port {port}")
+        logger.info(f"Tutoring server started on port {port}") 
     
     def stop(self):
         """Stop the gRPC server"""

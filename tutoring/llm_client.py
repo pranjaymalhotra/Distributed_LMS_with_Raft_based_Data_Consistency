@@ -7,6 +7,7 @@ import requests
 import json
 from typing import Optional, Dict, List
 from common.logger import get_logger
+import time
 
 logger = get_logger(__name__)
 
@@ -55,18 +56,15 @@ class OllamaClient:
     
     def generate(self, prompt: str, temperature: float = 0.7, 
                 max_tokens: Optional[int] = None) -> str:
-        """
-        Generate response from LLM.
+        """Generate response from LLM with detailed logging"""
+        start_time = time.time()
         
-        Args:
-            prompt: Input prompt
-            temperature: Sampling temperature
-            max_tokens: Maximum tokens to generate
-            
-        Returns:
-            Generated text response
-        """
         try:
+            logger.info(f"🤖 Ollama: Starting generation...")
+            logger.info(f"   🎯 Model: {self.model}")
+            logger.info(f"   📏 Prompt length: {len(prompt)} chars")
+            logger.info(f"   🌡️ Temperature: {temperature}")
+            
             # Prepare request
             data = {
                 "model": self.model,
@@ -78,26 +76,43 @@ class OllamaClient:
             if max_tokens:
                 data["options"] = {"num_predict": max_tokens}
             
-            # Make request
+            logger.info(f"📤 Ollama: Sending request to {self.base_url}")
+            
+            # Call Ollama API with extended timeout
             response = requests.post(
                 f"{self.base_url}/api/generate",
                 json=data,
-                timeout=60  # 60 second timeout
+                timeout=300  # 5 minutes
             )
+            
+            elapsed = time.time() - start_time
+            logger.info(f"⚡ Ollama: API call completed in {elapsed:.2f}s")
+            logger.info(f"   📊 Status: {response.status_code}")
             
             if response.status_code == 200:
                 result = response.json()
-                return result.get('response', '')
+                answer = result.get('response', '')
+                logger.info(f"✅ Ollama: Successfully generated response")
+                logger.info(f"   📏 Response length: {len(answer)} chars")
+                logger.info(f"   📝 Preview: {answer[:100]}...")
+                return answer
             else:
-                logger.error(f"Ollama API error: {response.status_code} - {response.text}")
+                logger.error(f"❌ Ollama: API error {response.status_code}")
+                logger.error(f"   📝 Error text: {response.text}")
                 return "I apologize, but I'm having trouble generating a response right now."
                 
         except requests.exceptions.Timeout:
-            logger.error("Ollama request timed out")
-            return "The response is taking too long. Please try again."
+            elapsed = time.time() - start_time
+            logger.error(f"⏰ Ollama: Request timed out after {elapsed:.2f}s")
+            return "The response is taking too long. Please try a simpler question."
+            
+        except requests.exceptions.ConnectionError:
+            logger.error(f"🔌 Ollama: Cannot connect to {self.base_url}")
+            return "Cannot connect to the AI service. Please check if Ollama is running."
             
         except Exception as e:
-            logger.error(f"Error generating response: {e}")
+            elapsed = time.time() - start_time
+            logger.error(f"💥 Ollama: Error after {elapsed:.2f}s: {e}")
             return "I encountered an error while processing your request."
     
     def generate_with_context(self, prompt: str, context: str, 
@@ -179,6 +194,17 @@ Please provide a helpful and educational response based on the context above."""
         except:
             return False
     
+    def get_available_models(self) -> list:
+        """Get list of available models"""
+        try:
+            response = requests.get(f"{self.base_url}/api/tags", timeout=5)
+            if response.status_code == 200:
+                models = response.json().get('models', [])
+                return [m['name'] for m in models]
+            return []
+        except:
+            return []
+        
     def pull_model(self, model_name: Optional[str] = None) -> bool:
         """
         Pull a model from Ollama registry.

@@ -6,15 +6,18 @@ Provides interface for students to interact with the system.
 import os
 from typing import List, Optional
 from datetime import datetime
-
-from client.base_client import BaseLMSClient
+import grpc
+from lms import lms_pb2, lms_pb2_grpc 
+from client.enhanced_base_client import EnhancedBaseLMSClient
+#from client.base_client import BaseLMSClient
 from common.constants import *
 from common.logger import get_logger
+import time
 
 logger = get_logger(__name__)
 
 
-class StudentClient(BaseLMSClient):
+class StudentClient(EnhancedBaseLMSClient):
     """
     Client application for students.
     """
@@ -282,17 +285,22 @@ class StudentClient(BaseLMSClient):
             print(f"✅ Downloaded to: {save_path}")
         else:
             print("❌ Download failed.")
-    
+
     def post_query(self):
-        """Post a query"""
+        """Post a query with guaranteed leader targeting"""
         print("\n--- POST QUERY ---")
         
+        # ALWAYS find and connect to leader first before doing anything
+        if not self._find_and_connect_to_current_leader():
+            print("❌ Could not connect to cluster leader. Try again later.")
+            return
+            
+        # Now proceed with the query using the leader connection
         query = input("\nEnter your question: ").strip()
         if not query:
-            print("Query cannot be empty.")
+            print("❌ Query cannot be empty")
             return
         
-        # Ask if they want LLM or instructor response
         print("\nWho should answer your query?")
         print("1. AI Tutor (instant response)")
         print("2. Instructor (may take time)")
@@ -300,25 +308,91 @@ class StudentClient(BaseLMSClient):
         choice = input("Select (1 or 2): ").strip()
         use_llm = (choice == "1")
         
-        # Post query
-        success, query_id = self.post_data(
-            DATA_TYPE_QUERY,
-            {
-                'query': query,
-                'use_llm': use_llm
-            }
-        )
+        print(f"\n🔄 Posting query to {'AI Tutor' if use_llm else 'Instructor'}...")
         
-        if success:
-            print(f"\n✅ Query posted successfully!")
-            print(f"Query ID: {query_id}")
-            if use_llm:
-                print("The AI tutor is preparing your answer...")
+        # Verify we're connected to leader
+        print(f"🔧 DEBUG: Using connection at: {self.server_addresses[self.current_server_index]}")
+        
+        # Set appropriate timeout - much longer for LLM queries
+        timeout = 300 if use_llm else 60  # 5 minutes for LLM, 1 minute otherwise
+        
+        try:
+            request = lms_pb2.QueryRequest(
+                token=self.token,
+                query=query,
+                use_llm=use_llm
+            )
+            
+            response = self.stub.PostQuery(request, timeout=timeout)
+            
+            if response.success:
+                print(f"✅ Query posted successfully!")
+                print(f"   📋 Query ID: {response.query_id}")
+                
+                if use_llm:
+                    print("\n🤖 AI Tutor is processing your question...")
+                    print("   ⏱️  This may take 1-3 minutes")
+                    print("   📊 Check option 8 to view the answer when ready")
+                    
+                    # Start a background thread to check for answer
+                    self._monitor_query_progress(response.query_id)
+                else:
+                    print("\n👨‍🏫 Your query has been sent to the instructor")
+                    print("   📧 You'll receive a response when available")
             else:
-                print("Your instructor will answer soon.")
-        else:
-            print("\n❌ Failed to post query.")
-    
+                print(f"❌ Failed to post query: {response.error}")
+                
+        except grpc.RpcError as e:
+            print(f"❌ RPC Error posting query: {e}")
+            
+            # Handle not-leader errors with automatic retargeting
+            if "not leader" in str(e).lower():
+                print("🔄 Not connected to leader, retrying with current leader...")
+                if self._find_and_connect_to_current_leader():
+                    print("✅ Connected to leader, retrying query...")
+                    self.post_query()  # Recursive retry
+                else:
+                    print("❌ Could not find cluster leader")
+            
+            # Handle timeout errors
+            elif e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                print("⏰ Request timed out. This could be because:")
+                print("   • AI model is still loading")
+                print("   • Server is overloaded")
+                print("   • Network issues")
+                print("\nTry again in a few minutes or choose the Instructor option")
+        
+        except Exception as e:
+            print(f"❌ Unexpected error: {e}")
+
+    def _monitor_query_progress(self, query_id: str):
+        """Monitor query processing progress"""
+        print("\n🔍 Monitoring query progress...")
+        
+        # Start a background thread to check for answer
+        def check_answer():
+            import time
+            for i in range(30):  # Check for 5 minutes (30 * 10 seconds)
+                time.sleep(10)
+                
+                try:
+                    # Check if answer is ready
+                    queries = self.get_data(DATA_TYPE_QUERY)
+                    for query in queries:
+                        if query.get('query_id') == query_id and query.get('answer'):
+                            print(f"\n🎉 Your AI tutor has answered your question!")
+                            print(f"📝 Check option 8 to view the full answer")
+                            return
+                except:
+                    pass
+            
+            print(f"\n⏳ Answer is still being processed. Check option 8 periodically.")
+        
+        # Start monitoring thread
+        import threading
+        monitor_thread = threading.Thread(target=check_answer, daemon=True)
+        monitor_thread.start()
+
     def view_queries(self):
         """View student's queries"""
         print("\n--- MY QUERIES ---")
@@ -406,22 +480,96 @@ def main():
     print("DISTRIBUTED LMS - STUDENT CLIENT")
     print("="*50)
     
-    # Get server addresses from config or use defaults
-    server_addresses = [
-        "localhost:6001",
-        "localhost:6002",
-        "localhost:6003",
-        "localhost:6004",
-        "localhost:6005"
-    ]
+    # Load configuration to get proper server addresses
+    try:
+        import json
+        import os
+        
+        # Get config path relative to project root
+        config_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 
+            'config.json'
+        )
+        
+        print(f"🔍 Loading config from: {config_path}")
+        
+        with open(config_path, 'r') as f:
+            config = json.load(f)
+        
+        # Extract server addresses from config
+        server_addresses = []
+        nodes = config['cluster']['nodes']
+        for node_id, node_config in nodes.items():
+            address = f"{node_config['host']}:{node_config['lms_port']}"
+            server_addresses.append(address)
+            
+        print(f"✅ Loaded {len(server_addresses)} server addresses: {server_addresses}")
+        logger.info(f"Loaded server addresses from config: {server_addresses}")
+        
+    except Exception as e:
+        print(f"❌ Could not load config: {e}")
+        logger.warning(f"Could not load config, using defaults: {e}")
+        # Fallback to default addresses
+        server_addresses = [
+            "localhost:6001",
+            "localhost:6002", 
+            "localhost:6003",
+            "localhost:6004"
+        ]
+        config = None
     
-    # Create client
+    # Create client with config-aware addresses
     client = StudentClient(server_addresses)
     
+    # Pass config to client for leader discovery
+    if config:
+        print("🔧 Setting client configuration...")
+        client.set_config(config)
+        print(f"✅ Client configuration set with {len(client.node_address_map)} nodes")
+        client.debug_cluster_status()
+    else:
+        print("⚠️ No configuration available - using basic rotation")
+    
+    if not client.is_connected():
+        print("❌ Failed to connect to any LMS server.")
+        return
     if not client.is_connected():
         print("Failed to connect to any LMS server.")
         return
+    if config:
+        client.set_config(config)
+        print("🔧 DEBUG: Running pre-login cluster status check...")
+        client.debug_cluster_status()
     
+    if not client.is_connected():
+        print("❌ Failed to connect to any LMS server.")
+        return
+
+    while True:
+        try:
+            # Login
+            print("\nPlease login to continue")
+            username = input("Username: ")
+            password = input("Password: ")
+
+            if client.login(username, password):
+                print(f"\nWelcome, {username}!")
+                
+                # ✅ Add post-login debug check
+                if config:
+                    print("🔧 DEBUG: Running post-login cluster status check...")
+                    client.debug_cluster_status()
+                
+                break
+            else:
+                print("Login failed. Please try again.")
+                retry = input("Try again? (y/n): ").lower()
+                if retry != 'y':
+                    return
+        except KeyboardInterrupt:
+            print("\nGoodbye!")
+            return    
+
     # Login loop
     while True:
         print("\nPlease login to continue")

@@ -21,8 +21,30 @@ service LMSService {
     // File operations
     rpc UploadFile(stream FileChunk) returns (UploadResponse);
     rpc DownloadFile(FileRequest) returns (stream FileChunk);
+    rpc RefreshToken(RefreshTokenRequest) returns (RefreshTokenResponse);
+    rpc CheckLeadership(LeadershipRequest) returns (LeadershipResponse);
+}
+message LeadershipRequest {
+    // Empty request
 }
 
+message LeadershipResponse {
+    bool is_leader = 1;
+    string leader_id = 2;
+    string node_id = 3;
+}
+
+message RefreshTokenRequest {
+    string refresh_token = 1;
+}
+
+message RefreshTokenResponse {
+    bool success = 1;
+    string access_token = 2;
+    string refresh_token = 3;
+    string error = 4;
+    int64 expires_in = 5;
+}
 // Authentication messages
 message LoginRequest {
     string username = 1;

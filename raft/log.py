@@ -8,6 +8,7 @@ Raft log implementation with support for:
 
 import json
 import os
+import time
 import threading
 from typing import List, Optional, Dict, Tuple
 from dataclasses import dataclass, asdict

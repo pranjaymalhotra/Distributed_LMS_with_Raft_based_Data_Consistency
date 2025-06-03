@@ -14,11 +14,26 @@
                 "raft_port": 5002,
                 "lms_port": 6002,
                 "role": "LMS_WITH_RAFT"
+            },
+            "node3": {
+                "id": "node3",
+                "host": "localhost",
+                "raft_port": 5003,
+                "lms_port": 6003,
+                "role": "LMS_WITH_RAFT"
+            },
+            "node4": {
+                "id": "node4",
+                "host": "localhost",
+                "raft_port": 5004,
+                "lms_port": 6004,
+                "role": "LMS_WITH_RAFT"
             }
         },
         "tutoring_server": {
             "host": "localhost",
             "port": 7001,
+            "ollama_url": "http://localhost:11434",
             "model": "deepseek-r1:1.5b",
             "context_window": 2048
         }
@@ -30,7 +45,7 @@
         "snapshot_interval": 100,
         "max_log_entries": 1000,
         "sync_interval_ms": 10,
-        "request_timeout_ms": 5000,
+        "request_timeout_ms": 500000,
         "max_append_entries": 100
     },
     "storage": {
@@ -41,7 +56,10 @@
         "database_dir": "data/database"
     },
     "auth": {
-        "token_expiry_hours": 24,
+        "token_expiry_hours": 1,
+        "refresh_token_expiry_days": 30,
+        "auto_refresh_enabled": true,
+        "refresh_threshold_seconds": 300,
         "default_users": [
             {
                 "username": "instructor1",
@@ -54,6 +72,12 @@
                 "password": "pass123",
                 "type": "STUDENT",
                 "name": "Alice Johnson"
+            },
+            {
+                "username": "123",
+                "password": "123",
+                "type": "STUDENT",
+                "name": "Pranjay"
             },
             {
                 "username": "student2",

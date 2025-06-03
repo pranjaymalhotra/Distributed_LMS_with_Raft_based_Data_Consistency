@@ -6,13 +6,18 @@ Handles incoming RPC requests for the Raft protocol.
 import grpc
 from concurrent import futures
 import threading
+import time
 from typing import Optional
+from lms import lms_pb2,lms_pb2_grpc
+import json 
+
 
 # import raft_pb2
 # import raft_pb2_grpc
-
+from lms import lms_pb2, lms_pb2_grpc
 from raft import raft_pb2
 from raft import raft_pb2_grpc
+from raft.state import NodeState
 from common.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +39,22 @@ class RaftRPCServer(raft_pb2_grpc.RaftServiceServicer):
         self.raft_node = raft_node
         self.server = None
         self.port = None
+
+    def GetLeaderInfo(self, request, context):
+        """Get current leader information"""
+        try:
+            status = self.raft_node.get_status()
+            
+            return raft_pb2.LeaderInfoResponse(
+                is_leader=(self.raft_node.state == NodeState.LEADER),
+                leader_id=status.get('leader_id', ''),
+                current_term=status['term'],
+                node_id=self.raft_node.node_id
+            )
+        except Exception as e:
+            logger.error(f"Error in GetLeaderInfo: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+
     
     def RequestVote(self, request, context):
         """Handle RequestVote RPC"""
@@ -134,7 +155,7 @@ class RaftRPCServer(raft_pb2_grpc.RaftServiceServicer):
         except Exception as e:
             logger.error(f"Error handling RemoveServer: {e}")
             context.abort(grpc.StatusCode.INTERNAL, str(e))
-    
+
     def HealthCheck(self, request, context):
         """Handle health check requests"""
         try:
@@ -142,28 +163,29 @@ class RaftRPCServer(raft_pb2_grpc.RaftServiceServicer):
             
             return raft_pb2.HealthCheckResponse(
                 healthy=True,
-                state=status['state'],
+                state=self.raft_node.state.value,
                 current_term=status['term'],
                 leader_id=status.get('leader_id', '')
             )
             
         except Exception as e:
-            logger.error(f"Error handling HealthCheck: {e}")
-            return raft_pb2.HealthCheckResponse(
-                healthy=False,
-                state="ERROR",
-                current_term=0,
-                leader_id=""
-            )
-    
+            logger.error(f"Error in HealthCheck: {e}")
+            context.abort(grpc.StatusCode.INTERNAL, str(e))
+
     def start(self, port: int):
         """Start the gRPC server"""
-        self.port = port
         self.server = grpc.server(
             futures.ThreadPoolExecutor(max_workers=10),
             options=[
-                ('grpc.max_send_message_length', 50 * 1024 * 1024),  # 50MB
-                ('grpc.max_receive_message_length', 50 * 1024 * 1024),  # 50MB
+                ('grpc.max_send_message_length', 50 * 1024 * 1024),
+                ('grpc.max_receive_message_length', 50 * 1024 * 1024),
+                ('grpc.keepalive_time_ms', 30000),
+                ('grpc.keepalive_timeout_ms', 5000),
+                ('grpc.keepalive_permit_without_calls', True),
+                ('grpc.http2.max_pings_without_data', 0),
+                ('grpc.http2.min_time_between_pings_ms', 10000),
+                ('grpc.http2.min_ping_interval_without_data_ms', 300000),
+                ('grpc.http2.max_ping_strikes', 0),
             ]
         )
         

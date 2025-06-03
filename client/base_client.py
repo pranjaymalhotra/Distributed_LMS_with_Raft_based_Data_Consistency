@@ -6,6 +6,7 @@ Provides common functionality for student and instructor clients.
 import grpc
 import json
 import os
+import time
 from typing import Dict, List, Optional, Tuple
 from abc import ABC, abstractmethod
 
@@ -91,20 +92,160 @@ class BaseLMSClient(ABC):
         
         logger.error("Failed to connect to any LMS server")
         return False
-    
-    def _handle_rpc_error(self, e: grpc.RpcError) -> bool:
-        """
-        Handle RPC errors and attempt reconnection if needed.
+
+    def _find_leader(self) -> bool:
+        """Find and connect to the current leader"""
+        logger.info("Searching for cluster leader...")
         
-        Returns:
-            True if should retry, False otherwise
-        """
-        if e.code() == grpc.StatusCode.UNAVAILABLE:
-            logger.warning("Server unavailable, attempting to connect to another server")
-            self.current_server_index = (self.current_server_index + 1) % len(self.server_addresses)
-            return self._connect_to_server()
+        # Try each server to find the leader
+        for address in self.server_addresses:
+            try:
+                # Create temporary connection
+                channel = grpc.insecure_channel(address)
+                
+                # Check if this is an LMS server by trying a simple operation
+                # We'll use a dummy login request to check server status
+                stub = lms_pb2_grpc.LMSServiceStub(channel)
+                
+                # Try to get server status (this will fail but tell us about leader)
+                request = lms_pb2.LoginRequest(
+                    username="__status_check__",
+                    password="__status_check__",
+                    user_type=self.user_type
+                )
+                
+                try:
+                    response = stub.Login(request, timeout=2)
+                    # If we get here, this server is responsive
+                    # It might tell us who the leader is in the error
+                    
+                    # Connect to this server for now
+                    if self.channel:
+                        self.channel.close()
+                    
+                    self.channel = channel
+                    self.stub = stub
+                    
+                    # Try to find leader hint in any operation
+                    # For now, we'll just use this server
+                    logger.info(f"Connected to LMS server at {address}")
+                    return True
+                    
+                except grpc.RpcError as e:
+                    # Server is reachable, might have leader info
+                    error_details = str(e.details()) if hasattr(e, 'details') else str(e)
+                    
+                    # Look for leader hint in error message
+                    if "leader:" in error_details.lower():
+                        # Extract leader info and try to connect
+                        logger.debug(f"Got leader hint from {address}: {error_details}")
+                    
+                    # For now, if server is reachable, use it
+                    if e.code() != grpc.StatusCode.UNAVAILABLE:
+                        if self.channel:
+                            self.channel.close()
+                        
+                        self.channel = channel
+                        self.stub = stub
+                        logger.info(f"Connected to LMS server at {address}")
+                        return True
+                        
+            except Exception as e:
+                logger.debug(f"Failed to check {address}: {e}")
+                continue
         
-        return False
+        return False    
+    def post_data(self, data_type: str, data: Dict, file_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+        """Enhanced post data with automatic retry"""
+        def _post_operation():
+            file_data = b""
+            filename = ""
+            if file_path and os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    file_data = f.read()
+                filename = os.path.basename(file_path)
+            
+            request = lms_pb2.PostRequest(
+                token=self.token,
+                type=data_type,
+                data=json.dumps(data),
+                file_data=file_data,
+                filename=filename
+            )
+            
+            response = self.stub.Post(request, timeout=30)
+            
+            if response.success:
+                return True, response.id
+            else:
+                if "not leader" in response.error.lower():
+                    # Create a custom exception instead of using grpc.RpcError constructor
+                    raise Exception(f"Not leader: {response.error}")
+                raise Exception(response.error)
+        
+        try:
+            return self._execute_with_retry(_post_operation)
+        except Exception as e:
+            logger.error(f"Post data failed: {e}")
+            return False, None
+
+    def _is_token_valid(self) -> bool:
+        """Check if current token is still valid"""
+        if not self.token:
+            return False
+        
+        # You'd need to store token creation time or parse JWT expiry
+        # This is a simplified version
+        return True  # Implement actual expiry check
+
+    def _ensure_valid_token(self) -> bool:
+        """Ensure we have a valid token"""
+        with self.auth_lock:
+            if not self.token:
+                print("🔧 DEBUG: No token available")
+                return False
+            
+            # Check if token is expired (simple time-based check)
+            if self.token_expires_at and time.time() > self.token_expires_at:
+                print("🔧 DEBUG: Token expired, attempting refresh...")
+                return self._refresh_token()
+            
+            print(f"🔧 DEBUG: Token appears valid: {self.token[:20]}...")
+            return True
+
+    def _refresh_token(self) -> bool:
+        """Attempt to refresh the access token"""
+        try:
+            if not self.refresh_token:
+                print("🔧 DEBUG: No refresh token available")
+                return False
+            
+            print("🔄 Refreshing access token...")
+            
+            request = lms_pb2.RefreshTokenRequest(
+                refresh_token=self.refresh_token
+            )
+            
+            response = self.stub.RefreshToken(request, timeout=10)
+            
+            if response.success:
+                with self.auth_lock:
+                    self.token = response.access_token
+                    self.refresh_token = response.refresh_token
+                    self.token_expires_at = time.time() + response.expires_in
+                
+                print("✅ Token refreshed successfully")
+                return True
+            else:
+                print(f"❌ Token refresh failed: {response.error}")
+                return False
+                
+        except grpc.RpcError as e:
+            print(f"❌ Token refresh RPC error: {e}")
+            return False
+        except Exception as e:
+            print(f"❌ Token refresh error: {e}")
+            return False
     
     def login(self, username: str, password: str) -> bool:
         """
@@ -170,9 +311,9 @@ class BaseLMSClient(ABC):
             return True
     
     def post_data(self, data_type: str, data: Dict, 
-                  file_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
+                file_path: Optional[str] = None) -> Tuple[bool, Optional[str]]:
         """
-        Post data to the LMS.
+        Post data to the LMS with automatic retry and leader finding.
         
         Args:
             data_type: Type of data to post
@@ -182,42 +323,80 @@ class BaseLMSClient(ABC):
         Returns:
             (success, id) tuple
         """
+        if not self._ensure_valid_token():
+            return False, None
         if not self.token:
             logger.error("Not authenticated")
             return False, None
         
-        try:
-            # Read file if provided
-            file_data = b""
-            filename = ""
-            if file_path and os.path.exists(file_path):
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
-                filename = os.path.basename(file_path)
-            
-            request = lms_pb2.PostRequest(
-                token=self.token,
-                type=data_type,
-                data=json.dumps(data),
-                file_data=file_data,
-                filename=filename
-            )
-            
-            response = self.stub.Post(request)
-            
-            if response.success:
-                logger.info(f"Successfully posted {data_type}")
-                return True, response.id
-            else:
-                logger.error(f"Post failed: {response.error}")
-                return False, None
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                # Read file if provided
+                file_data = b""
+                filename = ""
+                if file_path and os.path.exists(file_path):
+                    with open(file_path, 'rb') as f:
+                        file_data = f.read()
+                    filename = os.path.basename(file_path)
                 
-        except grpc.RpcError as e:
-            logger.error(f"Post RPC error: {e}")
-            if self._handle_rpc_error(e):
-                return self.post_data(data_type, data, file_path)  # Retry
-            return False, None
-    
+                request = lms_pb2.PostRequest(
+                    token=self.token,
+                    type=data_type,
+                    data=json.dumps(data),
+                    file_data=file_data,
+                    filename=filename
+                )
+                
+                response = self.stub.Post(request, timeout=10)
+                
+                if response.success:
+                    logger.info(f"Successfully posted {data_type}")
+                    return True, response.id
+                else:
+                    # Check if error indicates we need to find leader
+                    if "not leader" in response.error.lower() or "leader:" in response.error.lower():
+                        logger.warning(f"Not connected to leader: {response.error}")
+                        
+                        # Try to find and connect to leader
+                        if retry_count < max_retries - 1:
+                            logger.info("Attempting to find cluster leader...")
+                            time.sleep(1)  # Brief pause before retry
+                            
+                            # Rotate to next server
+                            self.current_server_index = (self.current_server_index + 1) % len(self.server_addresses)
+                            
+                            if self._connect_to_server():
+                                retry_count += 1
+                                continue
+                    
+                    logger.error(f"Post failed: {response.error}")
+                    return False, None
+                    
+            except grpc.RpcError as e:
+                logger.error(f"Post RPC error: {e}")
+                
+                # If server unavailable, try to reconnect
+                if e.code() == grpc.StatusCode.UNAVAILABLE:
+                    if retry_count < max_retries - 1:
+                        logger.info("Server unavailable, trying next server...")
+                        self.current_server_index = (self.current_server_index + 1) % len(self.server_addresses)
+                        
+                        if self._connect_to_server():
+                            retry_count += 1
+                            continue
+                
+                return False, None
+            
+            except Exception as e:
+                logger.error(f"Unexpected error in post_data: {e}")
+                return False, None
+        
+        logger.error(f"Failed after {max_retries} retries")
+        return False, None
+
     def get_data(self, data_type: str, filter_data: Optional[Dict] = None) -> List[Dict]:
         """
         Get data from the LMS.
@@ -303,6 +482,15 @@ class BaseLMSClient(ABC):
         except grpc.RpcError as e:
             logger.error(f"Upload RPC error: {e}")
             return False, None
+
+    def get_connection_status(self) -> Dict:
+        """Get current connection status"""
+        return {
+            'connected': self.is_connected(),
+            'authenticated': self.is_authenticated(),
+            'current_server': self.server_addresses[self.current_server_index] if self.server_addresses else None,
+            'username': self.username
+        }
     
     def download_file(self, filename: str, file_type: str, save_path: str) -> bool:
         """

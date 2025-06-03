@@ -117,11 +117,10 @@ class RaftNode:
     def stop(self):
         """Stop the Raft node"""
         logger.info(f"Stopping Raft node {self.node_id}")
-        
         with self.lock:
             self.running = False
             self.commit_cv.notify_all()
-        
+
         # Wait for threads to stop
         if self.election_thread:
             self.election_thread.join(timeout=2)
@@ -129,11 +128,15 @@ class RaftNode:
             self.heartbeat_thread.join(timeout=2)
         if self.commit_thread:
             self.commit_thread.join(timeout=2)
-        
-        # Close RPC connections
-        for channel in self.rpc_clients.values():
-            channel.close()
-        
+
+        # Close RPC connections properly
+        for peer_id, stub in self.rpc_clients.items():
+            try:
+                if hasattr(stub, '_channel'):
+                    stub._channel.close()
+            except Exception as e:
+                logger.debug(f"Error closing connection to {peer_id}: {e}")
+
         logger.info(f"Raft node {self.node_id} stopped")
     
     def handle_client_request(self, command: Dict, client_id: str, request_id: str) -> Tuple[bool, Optional[str], Optional[str]]:
@@ -596,7 +599,7 @@ class RaftNode:
             try:
                 channel = grpc.insecure_channel(peer_addr)
                 stub = raft_pb2_grpc.RaftServiceStub(channel)
-                self.rpc_clients[peer_id] = stub
+                self.rpc_clients[peer_id] = stub  # ✅ Store stub, not channel
                 logger.info(f"Connected to peer {peer_id} at {peer_addr}")
             except Exception as e:
                 logger.error(f"Failed to connect to peer {peer_id}: {e}")
